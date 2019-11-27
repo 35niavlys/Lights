@@ -7,6 +7,7 @@
 #include <NeoPixelBus.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 
 IPAddress address ( 192,  168,   0,  95); // choose an unique IP Adress
 IPAddress gateway ( 192,  168,   0,   1); // Router IP
@@ -50,8 +51,22 @@ RgbColor black = RgbColor(0);
 
 NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod>* strip = NULL;
 
-void convertHue(uint8_t light)
-{
+uint8_t add(uint8_t x, uint8_t y) {
+    uint8_t res = x + y;
+    return res |= -(res < x);
+}
+
+uint8_t sub(uint8_t x, uint8_t y) {
+    uint8_t res = x - y;
+    return res &= -(res <= x);
+}
+
+bool isValidGPIOpin(int pin) {
+   return (pin >= 0 && pin <= 5) || (pin >= 12 && pin <= 16);
+}
+
+void convertHue(uint8_t light) {
+ 
   double      hh, p, q, t, ff, s, v;
   long        i;
 
@@ -110,8 +125,8 @@ void convertHue(uint8_t light)
 
 }
 
-void convertXy(uint8_t light)
-{
+void convertXy(uint8_t light) {
+ 
   int optimal_bri = lights[light].bri;
   if (optimal_bri < 5) {
     optimal_bri = 5;
@@ -208,7 +223,6 @@ void infoLight(RgbColor color) {
   }
 }
 
-
 void apply_scene(uint8_t new_scene) {
   for (uint8_t light = 0; light < lightsCount; light++) {
     if ( new_scene == 1) {
@@ -248,9 +262,9 @@ void processLightdata(uint8_t light, float transitiontime) {
   }
   for (uint8_t i = 0; i < 3; i++) {
     if (lights[light].lightState) {
-      lights[light].stepLevel[i] = ((float)lights[light].colors[i] - lights[light].currentColors[i]) / transitiontime;
+      lights[light].stepLevel[i] = (lights[light].currentColors[i] - (float)lights[light].colors[i]) / transitiontime;
     } else {
-      lights[light].stepLevel[i] = lights[light].currentColors[i] / transitiontime;
+      lights[light].stepLevel[i] = - lights[light].currentColors[i] / transitiontime;
     }
   }
 }
@@ -278,8 +292,10 @@ void lightEngine() {
       if (lights[light].colors[0] != lights[light].currentColors[0] || lights[light].colors[1] != lights[light].currentColors[1] || lights[light].colors[2] != lights[light].currentColors[2]) {
         inTransition = true;
         for (uint8_t k = 0; k < 3; k++) {
-          if (lights[light].colors[k] != lights[light].currentColors[k]) lights[light].currentColors[k] += lights[light].stepLevel[k];
-          if ((lights[light].stepLevel[k] > 0.0 && lights[light].currentColors[k] > lights[light].colors[k]) || (lights[light].stepLevel[k] < 0.0 && lights[light].currentColors[k] < lights[light].colors[k])) lights[light].currentColors[k] = lights[light].colors[k];
+          if (lights[light].colors[k] != lights[light].currentColors[k])
+            lights[light].currentColors[k] += lights[light].stepLevel[k];
+          if ((lights[light].stepLevel[k] >= 0.0 && lights[light].currentColors[k] > lights[light].colors[k]) || (lights[light].stepLevel[k] <= 0.0 && lights[light].currentColors[k] < lights[light].colors[k]))
+            lights[light].currentColors[k] = lights[light].colors[k];
         }
         if (lightsCount > 1) {
           if (light == 0) {
@@ -318,7 +334,7 @@ void lightEngine() {
       if (lights[light].currentColors[0] != 0 || lights[light].currentColors[1] != 0 || lights[light].currentColors[2] != 0) {
         inTransition = true;
         for (uint8_t k = 0; k < 3; k++) {
-          if (lights[light].currentColors[k] != 0) lights[light].currentColors[k] -= lights[light].stepLevel[k];
+          if (lights[light].currentColors[k] != 0) lights[light].currentColors[k] += lights[light].stepLevel[k];
           if (lights[light].currentColors[k] < 0) lights[light].currentColors[k] = 0;
         }
         if (lightsCount > 1) {
@@ -359,46 +375,29 @@ void lightEngine() {
   if (inTransition) {
     delay(6);
     inTransition = false;
-  } else if (hwSwitch == true) {
-    if (digitalRead(onPin) == HIGH) {
+  } else if (hwSwitch) {
+    if (digitalRead(onPin)) {
       int i = 0;
-      while (digitalRead(onPin) == HIGH && i < 30) {
-        delay(20);
-        i++;
-      }
+      while (digitalRead(onPin) && i++ < 30) delay(20);
       for (int light = 0; light < lightsCount; light++) {
-        if (i < 30) {
-          // there was a short press
-          lights[light].lightState = true;
-        }
-        else {
+        lights[light].lightState = true;
+        if (i >= 30) {
           // there was a long press
-          lights[light].bri += 56;
-          if (lights[light].bri > 255) {
-            // don't increase the brightness more then maximum value
-            lights[light].bri = 255;
-          }
+          lights[light].bri = add(lights[light].bri, 56);
+          processLightdata(light, 1);
         }
       }
-    } else if (digitalRead(offPin) == HIGH) {
+    } else if (digitalRead(offPin)) {
       int i = 0;
-      while (digitalRead(offPin) == HIGH && i < 30) {
-        delay(20);
-        i++;
-      }
+      while (digitalRead(offPin) && i++ < 30) delay(20);
       for (int light = 0; light < lightsCount; light++) {
-        if (i < 30) {
-          // there was a short press
+        // there was a long press
+        lights[light].bri = sub(lights[light].bri, 56);
+        if (lights[light].bri == 0) {
+          lights[light].bri = 1;
           lights[light].lightState = false;
         }
-        else {
-          // there was a long press
-          lights[light].bri -= 56;
-          if (lights[light].bri < 1) {
-            // don't decrease the brightness less than minimum value.
-            lights[light].bri = 1;
-          }
-        }
+        processLightdata(light, 1);
       }
     }
   }
@@ -422,9 +421,7 @@ void saveState() {
   }
   File stateFile = SPIFFS.open("/state.json", "w");
   serializeJson(json, stateFile);
-
 }
-
 
 void restoreState() {
   File stateFile = SPIFFS.open("/state.json", "r");
@@ -464,7 +461,6 @@ void restoreState() {
     }
   }
 }
-
 
 bool saveConfig() {
   DynamicJsonDocument json(1024);
@@ -510,14 +506,8 @@ bool loadConfig() {
     return saveConfig();
   }
 
-  size_t size = configFile.size();
-  if (size > 1024) {
-    //Serial.println("Config file size is too large");
-    return false;
-  }
-
   if (configFile.size() > 1024) {
-    Serial.println("Config file size is too large");
+    //Serial.println("Config file size is too large");
     return false;
   }
 
@@ -544,8 +534,7 @@ bool loadConfig() {
   return true;
 }
 
-void ChangeNeoPixels(uint16_t newCount)
-{
+void ChangeNeoPixels(uint16_t newCount) {
   if (strip != NULL) {
     delete strip; // delete the previous dynamically created strip
   }
@@ -554,6 +543,7 @@ void ChangeNeoPixels(uint16_t newCount)
 }
 
 void setup() {
+  ArduinoOTA.begin();
   //Serial.begin(115200);
   //Serial.println();
   delay(1000);
@@ -665,25 +655,31 @@ void setup() {
           }
         }
 
+        if (values.containsKey("bri")) {
+          lights[light].bri = values["bri"];
+        }
+
+        if (values.containsKey("bri_inc")) {
+          int bri_inc = (int) values["bri_inc"];
+          if (bri_inc < 0) {
+            lights[light].bri = sub(lights[light].bri, -bri_inc);
+            if (lights[light].bri < 1) lights[light].bri = 1;
+          } else {
+            lights[light].bri = add(lights[light].bri, bri_inc);
+         }
+        }
+
         if (values.containsKey("on")) {
           if (values["on"]) {
             lights[light].lightState = true;
+            if (lights[light].bri == 1)
+              lights[light].bri = 100;
           } else {
             lights[light].lightState = false;
           }
           if (startup == 0) {
             stateSave = true;
           }
-        }
-
-        if (values.containsKey("bri")) {
-          lights[light].bri = values["bri"];
-        }
-
-        if (values.containsKey("bri_inc")) {
-          lights[light].bri += (int) values["bri_inc"];
-          if (lights[light].bri > 255) lights[light].bri = 255;
-          else if (lights[light].bri < 1) lights[light].bri = 1;
         }
 
         if (values.containsKey("transitiontime")) {
@@ -701,7 +697,7 @@ void setup() {
       }
       String output;
       serializeJson(root, output);
-      server.send(200, "text/plain", output);
+      server.send(200, "application/json", output);
       if (stateSave) {
         saveState();
       }
@@ -727,7 +723,7 @@ void setup() {
       root["colormode"] = "hs";
     String output;
     serializeJson(root, output);
-    server.send(200, "text/plain", output);
+    server.send(200, "application/json", output);
   });
 
   server.on("/detect", []() {
@@ -743,7 +739,7 @@ void setup() {
     root["version"] = 2.0;
     String output;
     serializeJson(root, output);
-    server.send(200, "text/plain", output);
+    server.send(200, "application/json", output);
   });
 
   server.on("/config", []() {
@@ -764,7 +760,7 @@ void setup() {
     root["sm"] = (String)submask[0] + "." + (String)submask[1] + "." + (String)submask[2] + "." + (String)submask[3];
     String output;
     serializeJson(root, output);
-    server.send(200, "text/plain", output);
+    server.send(200, "application/json", output);
   });
 
   server.on("/", []() {
@@ -772,12 +768,30 @@ void setup() {
       server.arg("name").toCharArray(lightName, server.arg("name").length() + 1);
       startup = server.arg("startup").toInt();
       scene = server.arg("scene").toInt();
-      lightsCount = server.arg("lightscount").toInt();
-      pixelCount = server.arg("pixelcount").toInt();
+      uint8_t _lightsCount = server.arg("lightscount").toInt();
+      if (_lightsCount < 1)
+        _lightsCount = 1;
+      uint8_t _pixelCount = server.arg("pixelcount").toInt();
+      if (_lightsCount > _pixelCount) {
+        server.send(400, "text/plain", "Can't set more lights than pixels");
+        return;
+      }
+      lightsCount = _lightsCount;
+      pixelCount = _pixelCount;
       transitionLeds = server.arg("transitionleds").toInt();
-      hwSwitch = server.arg("hwswitch").toInt();
-      onPin = server.arg("on").toInt();
-      offPin = server.arg("off").toInt();
+      hwSwitch = server.arg("hwswitch").toInt() > 0 ? true : false;
+      uint8_t _onPin = server.arg("on").toInt();
+      if (!isValidGPIOpin(_onPin)) {
+        server.send(400, "text/plain", "Invalid GPIO for onPin");
+        return;
+      }
+      onPin = _onPin;
+      uint8_t _offPin = server.arg("off").toInt();
+      if (!isValidGPIOpin(_offPin)) {
+        server.send(400, "text/plain", "Invalid GPIO for offPin");
+        return;
+      }
+      offPin = _offPin;
       saveConfig();
     } else if (server.hasArg("dhcp")) {
       useDhcp = server.arg("dhcp").toInt();
@@ -802,11 +816,45 @@ void setup() {
     ESP.reset();
   });
 
+  server.on("/debug", []() {
+    char macString[256] = {0};
+    sprintf(macString,
+      "State %s \n"
+      "colorMode: %d \n"
+      "current r: %f \t current g: %f \t current b: %f \n"
+      "step r: %f \t step g: %f \t step b: %f \n"
+      "r: %d \t g: %d \t b: %d \n"
+      "bri: %d \n"
+      "sat: %d \n"
+      "ct: %d \n"
+      "hue: %d \n"
+      "x: %f \n"
+      "y: %f",
+      lights[0].lightState ? "1" : "0",
+      lights[0].colorMode,
+      lights[0].currentColors[0],
+      lights[0].currentColors[1],
+      lights[0].currentColors[2],
+      lights[0].stepLevel[0],
+      lights[0].stepLevel[1],
+      lights[0].stepLevel[2],
+      lights[0].colors[0],
+      lights[0].colors[1],
+      lights[0].colors[2],
+      lights[0].bri,
+      lights[0].sat,
+      lights[0].ct,
+      lights[0].hue,
+      lights[0].x,
+      lights[0].y
+    );
+    server.send(200, "text/plain", macString);
+  });
+
   server.onNotFound(handleNotFound);
 
   server.begin();
 }
-
 
 RgbColor blendingEntert(float left[3], float right[3], float pixel) {
   uint8_t result[3];
@@ -864,6 +912,7 @@ void entertainment() {
 }
 
 void loop() {
+  ArduinoOTA.handle();
   server.handleClient();
   if (!entertainmentRun) {
     lightEngine();
