@@ -52,6 +52,23 @@ RgbColor black = RgbColor(0);
 NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod>* strip = NULL;
 //NeoPixelBus<NeoBrgFeature, Neo800KbpsMethod>* strip = NULL; // WS2811
 
+uint8_t add(uint8_t x, uint8_t y)
+{
+    uint8_t res = x + y;
+    return res |= -(res < x);
+}
+
+uint8_t sub(uint8_t x, uint8_t y)
+{
+    uint8_t res = x - y;
+    return res &= -(res <= x);
+}
+
+bool isValidGPIOpin(int pin)
+{
+   return (pin >= 0 && pin <= 5) || (pin >= 12 && pin <= 16);
+}
+
 void convertHue(uint8_t light) // convert hue / sat values from HUE API to RGB
 {
   double      hh, p, q, t, ff, s, v;
@@ -208,7 +225,7 @@ void handleNotFound() { // default webserver response for unknow requests
   for (uint8_t i = 0; i < server.args(); i++) {
     message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
   }
-  server.send(404, "text/plain", message);
+  server.send(404, "application/json", message);
 }
 
 void infoLight(RgbColor color) { // boot animation for leds count and wifi test
@@ -263,9 +280,9 @@ void processLightdata(uint8_t light, float transitiontime) { // calculate the st
   }
   for (uint8_t i = 0; i < 3; i++) {
     if (lights[light].lightState) {
-      lights[light].stepLevel[i] = ((float)lights[light].colors[i] - lights[light].currentColors[i]) / transitiontime;
+      lights[light].stepLevel[i] = (lights[light].currentColors[i] - (float)lights[light].colors[i]) / transitiontime;
     } else {
-      lights[light].stepLevel[i] = lights[light].currentColors[i] / transitiontime;
+      lights[light].stepLevel[i] = - lights[light].currentColors[i] / transitiontime;
     }
   }
 }
@@ -290,8 +307,10 @@ void lightEngine() {  // core function executed in loop()
       if (lights[light].colors[0] != lights[light].currentColors[0] || lights[light].colors[1] != lights[light].currentColors[1] || lights[light].colors[2] != lights[light].currentColors[2]) { // if not all RGB channels of the light are at desired level
         inTransition = true;
         for (uint8_t k = 0; k < 3; k++) { // loop with every RGB channel of the light
-          if (lights[light].colors[k] != lights[light].currentColors[k]) lights[light].currentColors[k] += lights[light].stepLevel[k]; // move RGB channel on step closer to desired level
-          if ((lights[light].stepLevel[k] > 0.0 && lights[light].currentColors[k] > lights[light].colors[k]) || (lights[light].stepLevel[k] < 0.0 && lights[light].currentColors[k] < lights[light].colors[k])) lights[light].currentColors[k] = lights[light].colors[k]; // if the current level go below desired level apply directly the desired level.
+          if (lights[light].colors[k] != lights[light].currentColors[k])
+            lights[light].currentColors[k] += lights[light].stepLevel[k];
+          if ((lights[light].stepLevel[k] >= 0.0 && lights[light].currentColors[k] > lights[light].colors[k]) || (lights[light].stepLevel[k] <= 0.0 && lights[light].currentColors[k] < lights[light].colors[k]))
+            lights[light].currentColors[k] = lights[light].colors[k];
         }
         if (lightsCount > 1) { // if are more then 1 virtual light we need to apply transition leds (set in the web interface)
           if (light == 0) { // if is the first light we must not have transition leds at the beginning 
@@ -340,7 +359,7 @@ void lightEngine() {  // core function executed in loop()
       if (lights[light].currentColors[0] != 0 || lights[light].currentColors[1] != 0 || lights[light].currentColors[2] != 0) { // proceed forward only in case not all RGB channels are zero
         inTransition = true;
         for (uint8_t k = 0; k < 3; k++) { //loop with every RGB channel
-          if (lights[light].currentColors[k] != 0) lights[light].currentColors[k] -= lights[light].stepLevel[k]; // remove one step level
+          if (lights[light].currentColors[k] != 0) lights[light].currentColors[k] += lights[light].stepLevel[k]; // remove one step level
           if (lights[light].currentColors[k] < 0) lights[light].currentColors[k] = 0; // save condition, if level go below zero set it to zero
         }
         if (lightsCount > 1) { // if the strip has more than one light
@@ -391,44 +410,29 @@ void lightEngine() {  // core function executed in loop()
   if (inTransition) { // wait 6ms for a nice transition effect
     delay(6);
     inTransition = false; // set inTransition bash to false (will be set bach to true on next level execution if desired state is not reached)
-  } else if (hwSwitch == true) { // if you want to use some GPIO's for on/off and brightness controll
-    if (digitalRead(onPin) == HIGH) { // on button pressed
+  } else if (hwSwitch) { // if you want to use some GPIO's for on/off and brightness controll
+    if (digitalRead(onPin)) { // on button pressed
       int i = 0;
-      while (digitalRead(onPin) == HIGH && i < 30) { // count how log is the button pressed
-        delay(20);
-        i++;
-      }
+      while (digitalRead(onPin) && i++ < 30) delay(20); // count how log is the button pressed
       for (int light = 0; light < lightsCount; light++) {
-        if (i < 30) { // there was a short press
-          lights[light].lightState = true;
-        }
-        else { // there was a long press
-          lights[light].bri += 56;
-          if (lights[light].bri > 255) {
-            // don't increase the brightness more then maximum value
-            lights[light].bri = 255;
-          }
+        lights[light].lightState = true;
+        if (i >= 30) {
+          // there was a long press
+          lights[light].bri = add(lights[light].bri, 56);
+          processLightdata(light, 1);
         }
       }
-    } else if (digitalRead(offPin) == HIGH) { // off button pressed
+    } else if (digitalRead(offPin)) { // off button pressed
       int i = 0;
-      while (digitalRead(offPin) == HIGH && i < 30) {
-        delay(20);
-        i++;
-      }
+      while (digitalRead(offPin) && i++ < 30) delay(20); // count how log is the button pressed
       for (int light = 0; light < lightsCount; light++) {
-        if (i < 30) {
-          // there was a short press
+        // there was a long press
+        lights[light].bri = sub(lights[light].bri, 56);
+        if (lights[light].bri == 0) {
+          lights[light].bri = 1;
           lights[light].lightState = false;
         }
-        else {
-          // there was a long press
-          lights[light].bri -= 56;
-          if (lights[light].bri < 1) {
-            // don't decrease the brightness less than minimum value.
-            lights[light].bri = 1;
-          }
-        }
+        processLightdata(light, 1);
       }
     }
   }
@@ -690,7 +694,7 @@ void setup() {
     DeserializationError error = deserializeJson(root, server.arg("plain"));
 
     if (error) {
-      server.send(404, "text/plain", "FAIL. " + server.arg("plain"));
+      server.send(404, "application/json", "FAIL. " + server.arg("plain"));
     } else {
       for (JsonPair state : root.as<JsonObject>()) {
         const char* key = state.key().c_str();
@@ -716,25 +720,31 @@ void setup() {
           }
         }
 
+        if (values.containsKey("bri")) {
+          lights[light].bri = values["bri"];
+        }
+
+        if (values.containsKey("bri_inc")) {
+          int bri_inc = (int) values["bri_inc"];
+          if (bri_inc < 0) {
+            lights[light].bri = sub(lights[light].bri, -bri_inc);
+            if (lights[light].bri < 1) lights[light].bri = 1;
+          } else {
+            lights[light].bri = add(lights[light].bri, bri_inc);
+         }
+        }
+
         if (values.containsKey("on")) {
           if (values["on"]) {
             lights[light].lightState = true;
+            if (lights[light].bri == 1)
+              lights[light].bri = 100;
           } else {
             lights[light].lightState = false;
           }
           if (startup == 0) {
             stateSave = true;
           }
-        }
-
-        if (values.containsKey("bri")) {
-          lights[light].bri = values["bri"];
-        }
-
-        if (values.containsKey("bri_inc")) {
-          lights[light].bri += (int) values["bri_inc"];
-          if (lights[light].bri > 255) lights[light].bri = 255;
-          else if (lights[light].bri < 1) lights[light].bri = 1;
         }
 
         if (values.containsKey("transitiontime")) {
@@ -752,7 +762,7 @@ void setup() {
       }
       String output;
       serializeJson(root, output);
-      server.send(200, "text/plain", output);
+      server.send(200, "application/json", output);
       if (stateSave) {
         saveState();
       }
@@ -778,7 +788,7 @@ void setup() {
       root["colormode"] = "hs";
     String output;
     serializeJson(root, output);
-    server.send(200, "text/plain", output);
+    server.send(200, "application/json", output);
   });
 
   server.on("/detect", []() { // HTTP GET request used to discover the light type
@@ -794,7 +804,7 @@ void setup() {
     root["version"] = LIGHT_VERSION;
     String output;
     serializeJson(root, output);
-    server.send(200, "text/plain", output);
+    server.send(200, "application/json", output);
   });
 
   server.on("/config", []() { // used by light web interface to get current configuration 
@@ -821,7 +831,7 @@ void setup() {
     root["sm"] = (String)submask[0] + "." + (String)submask[1] + "." + (String)submask[2] + "." + (String)submask[3];
     String output;
     serializeJson(root, output);
-    server.send(200, "text/plain", output);
+    server.send(200, "application/json", output);
   });
 
   server.on("/", []() { // light http web interface
@@ -829,8 +839,16 @@ void setup() {
       server.arg("name").toCharArray(lightName, LIGHT_NAME_MAX_LENGTH);
       startup = server.arg("startup").toInt();
       scene = server.arg("scene").toInt();
-      lightsCount = server.arg("lightscount").toInt();
-      pixelCount = server.arg("pixelcount").toInt();
+      uint8_t _lightsCount = server.arg("lightscount").toInt();
+      if (_lightsCount < 1)
+        _lightsCount = 1;
+      uint8_t _pixelCount = server.arg("pixelcount").toInt();
+      if (_lightsCount > _pixelCount) {
+        server.send(400, "application/json", "Can't set more lights than pixels");
+        return;
+      }
+      lightsCount = _lightsCount;
+      pixelCount = _pixelCount;
       transitionLeds = server.arg("transitionleds").toInt();
       rgb_multiplier[0] = server.arg("rpct").toInt();
       rgb_multiplier[1] = server.arg("gpct").toInt();
@@ -838,11 +856,19 @@ void setup() {
       for (uint16_t i = 0; i < lightsCount; i++) {
         dividedLightsArray[i] = server.arg("dividedLight_" + String(i)).toInt();
       }
-      hwSwitch = server.hasArg("hwswitch") ? server.arg("hwswitch").toInt() : 0;
-      if (server.hasArg("hwswitch")) {
-        onPin = server.arg("on").toInt();
-        offPin = server.arg("off").toInt();
+      hwSwitch = server.arg("hwswitch").toInt() > 0 ? true : false;
+      uint8_t _onPin = server.arg("on").toInt();
+      if (!isValidGPIOpin(_onPin)) {
+        server.send(400, "application/json", "Invalid GPIO for onPin");
+        return;
       }
+      onPin = _onPin;
+      uint8_t _offPin = server.arg("off").toInt();
+      if (!isValidGPIOpin(_offPin)) {
+        server.send(400, "application/json", "Invalid GPIO for offPin");
+        return;
+      }
+      offPin = _offPin;
       saveConfig();
     } else if (server.arg("section").toInt() == 2) {
       useDhcp = (!server.hasArg("disdhcp")) ? 1 : server.arg("disdhcp").toInt();
